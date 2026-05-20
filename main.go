@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/alpacahq/alpaca-trade-api-go/alpaca"
+	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/joho/godotenv"
 )
 
@@ -51,27 +51,44 @@ func createNewJSONFile(filename string, config Config, err error) {
 	}
 }
 
-func init() {
-	alpaca.SetBaseUrl("https://paper-api.alpaca.markets")
+func setupLogging() *os.File {
+	logFile, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Fatal("Failed to open log file: ", err)
+	}
+	log.SetOutput(logFile)
+	return logFile
 }
 
 func main() {
+	logFile := setupLogging()
+	defer logFile.Close()
+
+	log.Println("Starting process...")
 	// Load the .env file
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file, relying on system environment variables")
-		fmt.Println("Error loading .env file, relying on system environment variables")
 	}
-	// env var fetch example
-	// yuh = os.Getenv("YUH")
-	account, err := alpaca.GetAccount()
+
+	// Create an Alpaca client with paper trading credentials
+	client := alpaca.NewClient(alpaca.ClientOpts{
+		APIKey:    os.Getenv("APCA_API_KEY_ID"),
+		APISecret: os.Getenv("APCA_API_SECRET_KEY"),
+		BaseURL:   "https://paper-api.alpaca.markets",
+	})
+
+	account, err := client.GetAccount()
 	if err != nil {
+		log.Panicln(err)
 		panic(err)
 	}
+
 	if account.TradingBlocked {
-		fmt.Println("Account is currently restricted from trading.")
+		log.Panicln("Account is currently restricted from trading.")
 	}
-	fmt.Printf("%v is available as buying power.\n", account.BuyingPower)
+	log.Printf("%v is available as buying power.\n", account.BuyingPower)
+
 	filename := "config.json"
 	var config Config
 
@@ -82,14 +99,14 @@ func main() {
 		createNewJSONFile(filename, config, err)
 	} else {
 		// 3. If the file exists and read successfully, parse it
-		fmt.Printf("'%s' found! Loading data...\n", filename)
+		log.Printf("'%s' found! Loading data...\n", filename)
 		parseErr := json.Unmarshal(data, &config)
 		if parseErr != nil {
-			fmt.Printf("Error parsing existing JSON: %v\n", parseErr)
+			log.Printf("Error parsing existing JSON: %v\n", parseErr)
 			return
 		}
 	}
 
 	// 4. Use the data (whether it was loaded or newly created)
-	fmt.Printf("Application Loaded: %s (v%s) | Debug Mode: %t\n", config.AppName, config.Version, config.Debug)
+	log.Printf("Application Loaded: %s (v%s) | Debug Mode: %t\n", config.AppName, config.Version, config.Debug)
 }
