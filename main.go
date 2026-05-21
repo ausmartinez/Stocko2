@@ -10,13 +10,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Config represents the structure of our JSON file
-type Config struct {
-	AppName string `json:"app_name"`
-	Version string `json:"version"`
-	Debug   bool   `json:"debug"`
-}
-
 func createNewJSONFile(filename string, config Config, err error) {
 	// 2. Check if the error is specifically because the file doesn't exist
 	if os.IsNotExist(err) {
@@ -24,9 +17,10 @@ func createNewJSONFile(filename string, config Config, err error) {
 
 		// Set up your default object values
 		config = Config{
-			AppName: "MyGoApp",
-			Version: "1.0.0",
-			Debug:   false,
+			AppName:   "MyGoApp2",
+			Version:   "1.0.0",
+			Debug:     false,
+			Positions: []Position{},
 		}
 
 		// Convert the default object to pretty JSON bytes
