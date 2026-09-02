@@ -1,0 +1,405 @@
+package main
+
+import (
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata"
+)
+
+func testSession(t *testing.T, nowET string) TradingSession {
+	t.Helper()
+
+	loc, err := easternLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(hhmm string) time.Time {
+		ts, err := time.ParseInLocation("2006-01-02 15:04", "2026-09-02 "+hhmm, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+
+	return TradingSession{
+		Date:           "2026-09-02",
+		Open:           at("09:30"),
+		Close:          at("16:00"),
+		PremarketStart: at("04:00"),
+		Now:            at(nowET),
+		BeforeOpen:     false,
+	}
+}
+
+func testScanner(t *testing.T, cfg ScannerConfig) *Scanner {
+	t.Helper()
+
+	loc, err := easternLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Scanner{cfg: cfg, loc: loc}
+}
+
+// minuteBar builds a bar at an ET wall-clock time on the test session date.
+func minuteBar(t *testing.T, hhmm string, high, low, close float64) marketdata.Bar {
+	t.Helper()
+
+	loc, err := easternLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, err := time.ParseInLocation("2006-01-02 15:04", "2026-09-02 "+hhmm, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return marketdata.Bar{Timestamp: ts, High: high, Low: low, Close: close, Open: close}
+}
+
+func openPosition(t *testing.T, entry, target float64, lastSampled string) PaperPosition {
+	t.Helper()
+
+	loc, err := easternLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, err := time.ParseInLocation("2006-01-02 15:04", "2026-09-02 "+lastSampled, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PaperPosition{
+		Symbol:        "AAA",
+		EntryPrice:    entry,
+		TargetPrice:   target,
+		Shares:        1000 / entry,
+		Notional:      1000,
+		Status:        PositionOpen,
+		LastPrice:     entry,
+		LastSampledAt: ts.Format(time.RFC3339),
+	}
+}
+
+func TestAdvanceClosesOnTargetTouch(t *testing.T) {
+	s := testScanner(t, DefaultScannerConfig())
+	session := testSession(t, "09:45")
+	p := openPosition(t, 100, 100.1, "09:35")
+
+	// Dips first, then trades through the target.
+	sample := s.advance(session, &p, []marketdata.Bar{
+		minuteBar(t, "09:36", 100.0, 99.0, 99.5),
+		minuteBar(t, "09:37", 100.2, 99.6, 100.15),
+		minuteBar(t, "09:38", 101.0, 100.0, 100.8),
+	}, false)
+
+	if p.Status != PositionClosed {
+		t.Fatalf("status = %q, want closed", p.Status)
+	}
+	if p.ExitReason != ExitReasonTarget {
+		t.Errorf("exit_reason = %q, want target", p.ExitReason)
+	}
+	if math.Abs(p.ExitPrice-100.1) > 1e-9 {
+		t.Errorf("exit_price = %v, want the target 100.1", p.ExitPrice)
+	}
+	// Filled on the 09:37 bar, which ends 8 minutes after the 09:30 open.
+	if p.ClosedMinutes != 8 {
+		t.Errorf("closed_minutes = %d, want 8", p.ClosedMinutes)
+	}
+	if math.Abs(p.ReturnPct-0.1) > 1e-9 {
+		t.Errorf("return_pct = %v, want 0.1", p.ReturnPct)
+	}
+	// The -1% dip before the fill must be recorded.
+	if math.Abs(p.AdverseBeforeExitPct-(-1.0)) > 1e-9 {
+		t.Errorf("adverse_before_exit_pct = %v, want -1.0", p.AdverseBeforeExitPct)
+	}
+	if p.PnL <= 0 {
+		t.Errorf("pnl = %v, want positive", p.PnL)
+	}
+	if sample.Status != PositionClosed {
+		t.Errorf("sample status = %q, want closed", sample.Status)
+	}
+	if sample.High != 101.0 || sample.Low != 99.0 {
+		t.Errorf("sample high/low = %v/%v, want 101/99", sample.High, sample.Low)
+	}
+}
+
+func TestAdvanceStaysOpenBelowTarget(t *testing.T) {
+	s := testScanner(t, DefaultScannerConfig())
+	session := testSession(t, "09:45")
+	p := openPosition(t, 100, 105, "09:35")
+
+	s.advance(session, &p, []marketdata.Bar{
+		minuteBar(t, "09:36", 101.0, 98.0, 99.0),
+	}, false)
+
+	if p.Status != PositionOpen {
+		t.Fatalf("status = %q, want open", p.Status)
+	}
+	if p.ExitReason != "" {
+		t.Errorf("exit_reason = %q, want empty while open", p.ExitReason)
+	}
+	if math.Abs(p.MaxFavourablePct-1.0) > 1e-9 {
+		t.Errorf("MFE = %v, want 1.0", p.MaxFavourablePct)
+	}
+	if math.Abs(p.MaxAdversePct-(-2.0)) > 1e-9 {
+		t.Errorf("MAE = %v, want -2.0", p.MaxAdversePct)
+	}
+	if p.Samples != 1 {
+		t.Errorf("samples = %d, want 1", p.Samples)
+	}
+}
+
+func TestAdvanceFlattensNearClose(t *testing.T) {
+	s := testScanner(t, DefaultScannerConfig())
+	session := testSession(t, "15:56")
+	p := openPosition(t, 100, 105, "15:50")
+
+	s.advance(session, &p, []marketdata.Bar{
+		minuteBar(t, "15:51", 98.0, 97.0, 97.5),
+	}, true)
+
+	if p.Status != PositionClosed {
+		t.Fatalf("status = %q, want closed", p.Status)
+	}
+	if p.ExitReason != ExitReasonClose {
+		t.Errorf("exit_reason = %q, want session_close", p.ExitReason)
+	}
+	if math.Abs(p.ExitPrice-97.5) > 1e-9 {
+		t.Errorf("exit_price = %v, want the last price 97.5", p.ExitPrice)
+	}
+	if math.Abs(p.ReturnPct-(-2.5)) > 1e-9 {
+		t.Errorf("return_pct = %v, want -2.5", p.ReturnPct)
+	}
+	if p.PnL >= 0 {
+		t.Errorf("pnl = %v, want negative", p.PnL)
+	}
+}
+
+// Bars at or after the closing bell must not be counted.
+func TestAdvanceIgnoresBarsPastTheClose(t *testing.T) {
+	s := testScanner(t, DefaultScannerConfig())
+	session := testSession(t, "16:05")
+	p := openPosition(t, 100, 100.1, "15:58")
+
+	s.advance(session, &p, []marketdata.Bar{
+		minuteBar(t, "16:01", 105.0, 104.0, 104.5),
+	}, false)
+
+	if p.Status != PositionOpen {
+		t.Errorf("status = %q; an after-hours bar closed the position", p.Status)
+	}
+	if p.MaxFavourablePct != 0 {
+		t.Errorf("MFE = %v; after-hours data leaked in", p.MaxFavourablePct)
+	}
+}
+
+// Already-closed positions must not be reopened or re-priced by later ticks.
+func TestAdvanceLeavesClosedPositionsAlone(t *testing.T) {
+	s := testScanner(t, DefaultScannerConfig())
+	session := testSession(t, "10:00")
+
+	p := openPosition(t, 100, 100.1, "09:35")
+	p.Status = PositionClosed
+	p.ExitReason = ExitReasonTarget
+	p.ExitPrice = 100.1
+	p.ClosedMinutes = 8
+
+	s.advance(session, &p, []marketdata.Bar{
+		minuteBar(t, "09:50", 120.0, 90.0, 110.0),
+	}, true)
+
+	if p.ExitReason != ExitReasonTarget || p.ClosedMinutes != 8 {
+		t.Errorf("closed position was rewritten: reason=%q minutes=%d", p.ExitReason, p.ClosedMinutes)
+	}
+	if math.Abs(p.ExitPrice-100.1) > 1e-9 {
+		t.Errorf("exit_price = %v, want 100.1 unchanged", p.ExitPrice)
+	}
+}
+
+func TestLedgerOpenCount(t *testing.T) {
+	l := &Ledger{Positions: []PaperPosition{
+		{Status: PositionOpen}, {Status: PositionClosed}, {Status: PositionOpen},
+	}}
+	if got := l.Open(); got != 2 {
+		t.Errorf("Open() = %d, want 2", got)
+	}
+}
+
+func TestLedgerRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := LedgerPath(dir, "2026-09-02")
+
+	want := &Ledger{
+		SessionDate:   "2026-09-02",
+		ExitReference: ExitRefEntry,
+		ExitTargetPct: 0.1,
+		Ticks:         3,
+		Positions: []PaperPosition{
+			{Symbol: "AAA", Status: PositionOpen, EntryPrice: 10, TargetPrice: 10.01},
+			{Symbol: "BBB", Status: PositionClosed, ExitReason: ExitReasonTarget, ReturnPct: 0.1},
+		},
+	}
+	if err := SaveJSON(path, want); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadJSON[Ledger](path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || len(got.Positions) != 2 {
+		t.Fatalf("got %+v, want 2 positions", got)
+	}
+	if got.Ticks != 3 || got.Positions[1].ExitReason != ExitReasonTarget {
+		t.Errorf("ledger did not survive the round trip: %+v", got)
+	}
+
+	// A missing ledger is the first-tick case, not an error.
+	missing, err := LoadJSON[Ledger](LedgerPath(dir, "2026-01-01"))
+	if err != nil {
+		t.Fatalf("err = %v, want nil for a missing ledger", err)
+	}
+	if missing != nil {
+		t.Errorf("got %+v, want nil", missing)
+	}
+}
+
+// The CSV header and each record must stay the same width, or every column
+// silently shifts.
+func TestExportHeaderMatchesRecord(t *testing.T) {
+	got := len(exportRow{}.record())
+	if got != len(exportHeader) {
+		t.Fatalf("record has %d fields but header has %d", got, len(exportHeader))
+	}
+}
+
+func TestBuildExportRowsJoinsScanAndLedger(t *testing.T) {
+	dir := t.TempDir()
+	date := "2026-09-02"
+
+	scan := &ScanResult{
+		SessionDate: date,
+		Phase:       PhaseOpen,
+		Candidates: []GapCandidate{
+			{
+				Symbol: "WIN", Direction: "down", DiscoveredAt: PhasePremarket, SeenPremarket: true,
+				PrevClose: 100, GapPct: -5, GapATR: 1.2, GapSigma: -2.1, AvgVolume: 500000,
+				PrevVolumeRatio: 1.5, Methods: []string{MethodPercent, MethodATR},
+			},
+			{
+				Symbol: "FADE", Direction: "up", DiscoveredAt: PhasePremarket, SeenPremarket: true,
+				PrevClose: 50, GapPct: 0.4, Faded: true, Methods: []string{},
+			},
+		},
+	}
+	if err := SaveScanResult(PhaseFile(dir, date, PhaseOpen), scan); err != nil {
+		t.Fatal(err)
+	}
+
+	ledger := &Ledger{SessionDate: date, Positions: []PaperPosition{{
+		Symbol: "WIN", Status: PositionClosed, EntryPrice: 95, TargetPrice: 95.095,
+		ExitPrice: 95.095, ExitReason: ExitReasonTarget, ClosedMinutes: 20,
+		ReturnPct: 0.1, PnL: 1.0, MaxAdversePct: -2.5, AdverseBeforeExitPct: -2.5,
+	}}}
+	if err := SaveJSON(LedgerPath(dir, date), ledger); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := buildExportRows(dir, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (faded row retained as a negative)", len(rows))
+	}
+
+	win := rows[0]
+	if win.Symbol != "WIN" {
+		t.Fatalf("first row is %q, want WIN", win.Symbol)
+	}
+	if win.Source != "ledger" {
+		t.Errorf("source = %q, want ledger", win.Source)
+	}
+	if !win.IsDownGap {
+		t.Error("is_down_gap = false for a down gapper")
+	}
+	if win.MethodCount != 2 || !win.MethodPct || !win.MethodATR || win.MethodSigma {
+		t.Errorf("method dummies wrong: count=%d pct=%t atr=%t sigma=%t",
+			win.MethodCount, win.MethodPct, win.MethodATR, win.MethodSigma)
+	}
+	if win.AbsGapPct != 5 {
+		t.Errorf("abs_gap_pct = %v, want 5", win.AbsGapPct)
+	}
+	if !win.HitTarget || win.ExitMinutes != 20 {
+		t.Errorf("outcome not joined: hit=%t minutes=%d", win.HitTarget, win.ExitMinutes)
+	}
+
+	fade := rows[1]
+	if !fade.Faded || fade.MethodCount != 0 {
+		t.Errorf("faded row wrong: faded=%t methods=%d", fade.Faded, fade.MethodCount)
+	}
+	if fade.Source != "" {
+		t.Errorf("faded row source = %q, want empty (never bought)", fade.Source)
+	}
+}
+
+func TestExportCSVWritesBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	date := "2026-09-02"
+
+	scan := &ScanResult{SessionDate: date, Phase: PhaseOpen, Candidates: []GapCandidate{
+		{Symbol: "AAA", Direction: "up", GapPct: 5, Methods: []string{MethodPercent}},
+	}}
+	if err := SaveScanResult(PhaseFile(dir, date, PhaseOpen), scan); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveJSON(SessionFile(dir, date, "samples"), []PositionSample{
+		{SessionDate: date, Symbol: "AAA", At: "2026-09-02T09:40:00-04:00", MinutesFromOpen: 10, Price: 101},
+		{SessionDate: date, Symbol: "AAA", At: "2026-09-02T09:45:00-04:00", MinutesFromOpen: 15, Price: 102},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(dir, "export")
+	rows, samples, err := ExportCSV(dir, "", out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("candidate rows = %d, want 1", rows)
+	}
+	if samples != 2 {
+		t.Errorf("sample rows = %d, want 2", samples)
+	}
+
+	data, err := os.ReadFile(filepath.Join(out, "candidates.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(string(data))
+	if len(lines) != 2 {
+		t.Fatalf("candidates.csv has %d lines, want header + 1 row", len(lines))
+	}
+	if countFields(lines[0]) != countFields(lines[1]) {
+		t.Errorf("header has %d fields but the row has %d",
+			countFields(lines[0]), countFields(lines[1]))
+	}
+}
+
+func splitLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func countFields(line string) int {
+	return len(strings.Split(line, ","))
+}

@@ -35,3 +35,6 @@ go.work.sum
 # .vscode/
 
 *.json
+
+# Scanner output and collected dataset
+data/
