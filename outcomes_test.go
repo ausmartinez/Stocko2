@@ -195,6 +195,53 @@ func TestBuildPortfolio(t *testing.T) {
 	}
 }
 
+// Excursions must ignore the entry bar's own range: the entry is that bar's
+// close, so its high and low may have printed before the position existed.
+// Counting them would report a move no exit could have captured, and would
+// bias any target sweep built on MaxFavourablePct.
+func TestExcursionsExcludeTheEntryBar(t *testing.T) {
+	s := &Scanner{cfg: ScannerConfig{
+		EntryMinutesFromOpen: 5,
+		ExitReference:        ExitRefEntry,
+		ExitTargetPct:        100, // unreachable, so it holds to the close
+	}}
+
+	// The entry bar swings 80-120 but closes at 100, which is the fill.
+	track := []IntradayBar{
+		{MinutesFromOpen: 5, Open: 100, High: 120, Low: 80, Close: 100},
+		{MinutesFromOpen: 10, Open: 100, High: 105, Low: 95, Close: 102},
+	}
+
+	o := s.scoreCandidate(TradingSession{}, &ScanResult{},
+		GapCandidate{Symbol: "AAA", PrevClose: 100}, track)
+
+	if math.Abs(o.MaxFavourablePct-5.0) > 1e-9 {
+		t.Errorf("MFE = %v%%, want 5%% from the bar after entry, not 20%% from the entry bar",
+			o.MaxFavourablePct)
+	}
+	if math.Abs(o.MaxAdversePct-(-5.0)) > 1e-9 {
+		t.Errorf("MAE = %v%%, want -5%%, not -20%%", o.MaxAdversePct)
+	}
+}
+
+// A position entered on the final bar never gets a chance to move.
+func TestExcursionsAreZeroWhenEntryIsTheLastBar(t *testing.T) {
+	s := &Scanner{cfg: ScannerConfig{
+		EntryMinutesFromOpen: 5,
+		ExitReference:        ExitRefEntry,
+		ExitTargetPct:        1.0,
+	}}
+
+	track := []IntradayBar{{MinutesFromOpen: 5, Open: 100, High: 120, Low: 80, Close: 100}}
+
+	o := s.scoreCandidate(TradingSession{}, &ScanResult{},
+		GapCandidate{Symbol: "AAA", PrevClose: 100}, track)
+
+	if o.MaxFavourablePct != 0 || o.MaxAdversePct != 0 {
+		t.Errorf("MFE=%v MAE=%v, want zeroes", o.MaxFavourablePct, o.MaxAdversePct)
+	}
+}
+
 func TestSimulateExitHitsTarget(t *testing.T) {
 	s := &Scanner{cfg: ScannerConfig{
 		EntryMinutesFromOpen: 5,

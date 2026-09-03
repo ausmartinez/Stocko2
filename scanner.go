@@ -61,6 +61,13 @@ type GapCandidate struct {
 	GapSigma          float64 `json:"gap_sigma"`
 	SigmaSamples      int     `json:"sigma_samples"`
 
+	// The two-sided quote at scan time. This is the dominant trading cost and
+	// it is indicative only: the spread actually paid is whatever is quoted at
+	// entry, which on a gapper minutes after the bell can be far wider.
+	Bid       float64 `json:"bid"`
+	Ask       float64 `json:"ask"`
+	SpreadPct float64 `json:"spread_pct"`
+
 	PremarketVolume uint64  `json:"premarket_volume"`
 	PremarketHigh   float64 `json:"premarket_high"`
 	PremarketLow    float64 `json:"premarket_low"`
@@ -168,6 +175,9 @@ type rawGap struct {
 	refPrice   float64
 	refSource  string
 	gapPct     float64
+	bid        float64
+	ask        float64
+	spreadPct  float64
 }
 
 // Scan runs the full pipeline for the given session and returns the watchlist.
@@ -498,6 +508,14 @@ func (s *Scanner) prescreen(
 				continue
 			}
 
+			// The snapshot already carries the quote, so recording the spread
+			// costs no extra request.
+			var bidPrice, askPrice float64
+			if snap.LatestQuote != nil {
+				bidPrice, askPrice = snap.LatestQuote.BidPrice, snap.LatestQuote.AskPrice
+			}
+			bid, ask, spreadPct := quoteSpread(bidPrice, askPrice)
+
 			local = append(local, rawGap{
 				symbol:     symbol,
 				prevClose:  prevBar.Close,
@@ -506,6 +524,9 @@ func (s *Scanner) prescreen(
 				refPrice:   ref,
 				refSource:  source,
 				gapPct:     gapPct,
+				bid:        bid,
+				ask:        ask,
+				spreadPct:  spreadPct,
 			})
 		}
 
@@ -711,6 +732,9 @@ func (s *Scanner) buildCandidate(raw rawGap, history []marketdata.Bar) GapCandid
 		RefPrice:   raw.refPrice,
 		RefSource:  raw.refSource,
 		GapPct:     raw.gapPct,
+		Bid:        raw.bid,
+		Ask:        raw.ask,
+		SpreadPct:  raw.spreadPct,
 		// Empty rather than nil so faded rows serialise as [] for a dataframe.
 		Methods: []string{},
 	}
@@ -951,8 +975,8 @@ func PrintWatchlist(result *ScanResult) {
 		return
 	}
 
-	fmt.Printf("%-8s %-5s %-10s %9s %9s %8s %8s %9s %10s  %s\n",
-		"SYMBOL", "DIR", "FOUND", "PREV", "REF", "GAP%", "xATR", "SIGMA", "PM VOL", "METHODS")
+	fmt.Printf("%-8s %-5s %-10s %9s %9s %8s %8s %9s %8s %10s  %s\n",
+		"SYMBOL", "DIR", "FOUND", "PREV", "REF", "GAP%", "xATR", "SIGMA", "SPREAD%", "PM VOL", "METHODS")
 	for _, c := range result.Candidates {
 		found := c.DiscoveredAt
 		if c.Faded {
@@ -962,11 +986,20 @@ func PrintWatchlist(result *ScanResult) {
 		if methods == "" {
 			methods = "-"
 		}
-		fmt.Printf("%-8s %-5s %-10s %9.2f %9.2f %7.2f%% %8.2f %9.2f %10d  %s\n",
+		fmt.Printf("%-8s %-5s %-10s %9.2f %9.2f %7.2f%% %8.2f %9.2f %8s %10d  %s\n",
 			c.Symbol, c.Direction, found, c.PrevClose, c.RefPrice, c.GapPct, c.GapATR,
-			c.GapSigma, c.PremarketVolume, methods)
+			c.GapSigma, formatSpread(c.SpreadPct), c.PremarketVolume, methods)
 	}
 	fmt.Println()
+}
+
+// formatSpread renders an unmeasured spread as "-" rather than 0.00, which
+// would read as a free round trip.
+func formatSpread(spreadPct float64) string {
+	if spreadPct <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.3f", spreadPct)
 }
 
 // rateLimiter is a simple token bucket that refills at a fixed rate, used to

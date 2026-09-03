@@ -48,6 +48,9 @@ type exportRow struct {
 	GapSigma             float64
 	ATR                  float64
 	OvernightStdevPct    float64
+	Bid                  float64
+	Ask                  float64
+	SpreadPct            float64
 	PremarketVolume      uint64
 	PremarketVolumeRatio float64
 	PremarketRangePct    float64
@@ -57,6 +60,8 @@ type exportRow struct {
 	// Outcome.
 	EntryPrice           float64
 	TargetPrice          float64
+	TargetPct            float64
+	TargetBasis          string
 	ExitPrice            float64
 	ExitReason           string
 	ExitMinutes          int
@@ -68,6 +73,11 @@ type exportRow struct {
 	CloseReturnPct       float64
 	GapFilled            bool
 	HitTarget            bool
+
+	// Friction and the return after paying it. Regress on the net columns.
+	CostPct      float64
+	NetReturnPct float64
+	NetPnL       float64
 }
 
 var exportHeader = []string{
@@ -77,12 +87,14 @@ var exportHeader = []string{
 	"prev_close", "prev_volume", "avg_volume", "prev_volume_ratio",
 	"prev_day_return_pct", "prev_day_range_pct",
 	"ref_price", "ref_source", "gap_pct", "abs_gap_pct", "gap_atr", "gap_sigma",
-	"atr", "overnight_stdev_pct",
+	"atr", "overnight_stdev_pct", "bid", "ask", "spread_pct",
 	"premarket_volume", "premarket_volume_ratio", "premarket_range_pct",
 	"projected_gap_pct", "gap_delta_pct",
-	"entry_price", "target_price", "exit_price", "exit_reason", "exit_minutes",
+	"entry_price", "target_price", "target_pct", "target_basis",
+	"exit_price", "exit_reason", "exit_minutes",
 	"return_pct", "pnl", "max_favourable_pct", "max_adverse_pct",
 	"adverse_before_exit_pct", "close_return_pct", "gap_filled", "hit_target",
+	"cost_pct", "net_return_pct", "net_pnl",
 }
 
 func (r exportRow) record() []string {
@@ -93,12 +105,14 @@ func (r exportRow) record() []string {
 		f(r.PrevClose), u(r.PrevVolume), u(r.AvgVolume), f(r.PrevVolumeRatio),
 		f(r.PrevDayReturnPct), f(r.PrevDayRangePct),
 		f(r.RefPrice), r.RefSource, f(r.GapPct), f(r.AbsGapPct), f(r.GapATR), f(r.GapSigma),
-		f(r.ATR), f(r.OvernightStdevPct),
+		f(r.ATR), f(r.OvernightStdevPct), f(r.Bid), f(r.Ask), f(r.SpreadPct),
 		u(r.PremarketVolume), f(r.PremarketVolumeRatio), f(r.PremarketRangePct),
 		f(r.ProjectedGapPct), f(r.GapDeltaPct),
-		f(r.EntryPrice), f(r.TargetPrice), f(r.ExitPrice), r.ExitReason, strconv.Itoa(r.ExitMinutes),
+		f(r.EntryPrice), f(r.TargetPrice), f(r.TargetPct), r.TargetBasis,
+		f(r.ExitPrice), r.ExitReason, strconv.Itoa(r.ExitMinutes),
 		f(r.ReturnPct), f(r.PnL), f(r.MaxFavourablePct), f(r.MaxAdversePct),
 		f(r.AdverseBeforeExitPct), f(r.CloseReturnPct), b(r.GapFilled), b(r.HitTarget),
+		f(r.CostPct), f(r.NetReturnPct), f(r.NetPnL),
 	}
 }
 
@@ -301,6 +315,9 @@ func rowFromCandidate(date, phase string, c GapCandidate) exportRow {
 		GapSigma:             c.GapSigma,
 		ATR:                  c.ATR,
 		OvernightStdevPct:    c.OvernightStdevPct,
+		Bid:                  c.Bid,
+		Ask:                  c.Ask,
+		SpreadPct:            c.SpreadPct,
 		PremarketVolume:      c.PremarketVolume,
 		PremarketVolumeRatio: c.PremarketVolumeRatio,
 		PremarketRangePct:    c.PremarketRangePct,
@@ -324,6 +341,8 @@ func applyLedger(r *exportRow, p PaperPosition) {
 	r.Source = "ledger"
 	r.EntryPrice = p.EntryPrice
 	r.TargetPrice = p.TargetPrice
+	r.TargetPct = p.TargetPct
+	r.TargetBasis = p.TargetBasis
 	r.ExitPrice = p.ExitPrice
 	r.ExitReason = p.ExitReason
 	r.ExitMinutes = p.ClosedMinutes
@@ -333,6 +352,9 @@ func applyLedger(r *exportRow, p PaperPosition) {
 	r.MaxAdversePct = p.MaxAdversePct
 	r.AdverseBeforeExitPct = p.AdverseBeforeExitPct
 	r.HitTarget = p.ExitReason == ExitReasonTarget
+	r.CostPct = p.CostPct
+	r.NetReturnPct = p.NetReturnPct
+	r.NetPnL = p.NetPnL
 }
 
 // applyOutcome only fills gaps the ledger did not, so a live result is never
@@ -346,6 +368,8 @@ func applyOutcome(r *exportRow, o Outcome) {
 	r.Source = "outcome"
 	r.EntryPrice = o.EntryPrice
 	r.TargetPrice = o.ExitTargetPrice
+	r.TargetPct = o.ExitTargetPct
+	r.TargetBasis = o.ExitTargetBasis
 	r.ExitPrice = o.ExitPrice
 	r.ExitReason = o.ExitReason
 	r.ExitMinutes = o.ExitMinutes
@@ -354,6 +378,10 @@ func applyOutcome(r *exportRow, o Outcome) {
 	r.MaxAdversePct = o.MaxAdversePct
 	r.AdverseBeforeExitPct = o.AdverseBeforeExitPct
 	r.HitTarget = o.ExitReason == ExitReasonTarget
+	r.CostPct = o.CostPct
+	r.NetReturnPct = o.NetStrategyReturnPct
+	// The simulated path has no share count, so notional P&L stays a ledger
+	// concept and is left at zero here.
 }
 
 // writeSamples emits the long-format panel: one row per position per tick from

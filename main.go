@@ -256,8 +256,10 @@ func main() {
 		"advance the live paper book by one tick: buy at the first tick, sell on target, flatten near the close")
 	export := flag.Bool("export", false,
 		"flatten collected JSON into candidates.csv and samples.csv")
+	sweep := flag.Bool("sweep", false,
+		"replay collected outcomes against a range of ATR target multiples to find the best expectancy")
 	date := flag.String("date", "",
-		"session date YYYY-MM-DD for -outcomes and -export (default: most recent / all)")
+		"session date YYYY-MM-DD for -outcomes, -export and -sweep (default: most recent / all)")
 	flag.Parse()
 
 	logFile := setupLogging()
@@ -304,6 +306,10 @@ func main() {
 	case *export:
 		if err := runExport(config.Scanner, *date); err != nil {
 			log.Fatalf("Export failed: %v", err)
+		}
+	case *sweep:
+		if err := runSweep(config.Scanner, *date); err != nil {
+			log.Fatalf("Sweep failed: %v", err)
 		}
 	case *outcomes:
 		if err := runOutcomes(client, config.Scanner, *date); err != nil {

@@ -64,12 +64,31 @@ type ScannerConfig struct {
 	EntryMinutesFromOpen   int   `json:"entry_minutes_from_open"`
 	OutcomeHorizonsMinutes []int `json:"outcome_horizons_minutes"`
 
-	// Strategy simulation: sell as soon as price clears the reference by
-	// ExitTargetPct, otherwise hold to the close. ExitReference is "entry"
-	// (any profit on the trade) or "prev_close" (the gap has filled and gone
-	// green, which only makes sense for down gappers).
-	ExitReference string  `json:"exit_reference"`
-	ExitTargetPct float64 `json:"exit_target_pct"`
+	// Strategy simulation: sell as soon as price clears the target, otherwise
+	// hold to the close. ExitReference is "entry" (any profit on the trade) or
+	// "prev_close" (the gap has filled and gone green, which only makes sense
+	// for down gappers).
+	ExitReference string `json:"exit_reference"`
+
+	// ExitTargetMode is "atr" (ExitTargetATR multiples of the symbol's daily
+	// range) or "pct" (a flat ExitTargetPct). ATR mode is the default because
+	// one flat percentage cannot suit both a $2 stock and a $500 one.
+	// ExitTargetPct still applies as the fallback when a symbol has no ATR.
+	ExitTargetMode string  `json:"exit_target_mode"`
+	ExitTargetATR  float64 `json:"exit_target_atr"`
+	ExitTargetPct  float64 `json:"exit_target_pct"`
+
+	// MinTargetCostMult floors every target at this multiple of its own
+	// round-trip cost, so a fill is never a loss. At 2.0 half the move is kept.
+	MinTargetCostMult float64 `json:"min_target_cost_mult"`
+
+	// SweepATRMultiples is the grid -sweep replays collected trades against.
+	// Empty uses the built-in range.
+	SweepATRMultiples []float64 `json:"sweep_atr_multiples"`
+
+	// Costs charged against every simulated round trip, so the reported
+	// return is net of the friction a real fill would have paid.
+	Costs CostModel `json:"costs"`
 
 	// Live paper tracking.
 	PositionNotional           float64 `json:"position_notional"`
@@ -130,7 +149,11 @@ func DefaultScannerConfig() ScannerConfig {
 		EntryMinutesFromOpen:   5,
 		OutcomeHorizonsMinutes: []int{5, 15, 30, 60, 120, 240},
 		ExitReference:          ExitRefEntry,
+		ExitTargetMode:         ExitTargetModeATR,
+		ExitTargetATR:          0.25,
 		ExitTargetPct:          0.1,
+		MinTargetCostMult:      2.0,
+		Costs:                  DefaultCostModel(),
 
 		PositionNotional:           1000,
 		CloseAllMinutesBeforeClose: 5,
@@ -212,8 +235,25 @@ func applyScannerDefaults(cfg *ScannerConfig) {
 	if cfg.ExitReference == "" {
 		cfg.ExitReference = d.ExitReference
 	}
+	if cfg.ExitTargetMode == "" {
+		cfg.ExitTargetMode = d.ExitTargetMode
+	}
+	if cfg.ExitTargetATR <= 0 {
+		cfg.ExitTargetATR = d.ExitTargetATR
+	}
 	if cfg.ExitTargetPct <= 0 {
 		cfg.ExitTargetPct = d.ExitTargetPct
+	}
+	if cfg.MinTargetCostMult <= 0 {
+		cfg.MinTargetCostMult = d.MinTargetCostMult
+	}
+	// SlippagePct and AssumedSpreadPct are deliberately not filled: zero is a
+	// meaningful choice for both.
+	if cfg.Costs.PerShareFee <= 0 {
+		cfg.Costs.PerShareFee = d.Costs.PerShareFee
+	}
+	if cfg.Costs.SellNotionalPct <= 0 {
+		cfg.Costs.SellNotionalPct = d.Costs.SellNotionalPct
 	}
 	if cfg.PositionNotional <= 0 {
 		cfg.PositionNotional = d.PositionNotional

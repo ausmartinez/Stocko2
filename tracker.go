@@ -30,6 +30,8 @@ type PaperPosition struct {
 	Shares        float64 `json:"shares"`
 	Notional      float64 `json:"notional"`
 	TargetPrice   float64 `json:"target_price"`
+	TargetPct     float64 `json:"target_pct"`
+	TargetBasis   string  `json:"target_basis"`
 	ExitReference string  `json:"exit_reference"`
 
 	// Signal as it stood at entry, frozen so later scans cannot rewrite it.
@@ -50,6 +52,10 @@ type PaperPosition struct {
 	MaxFavourablePct float64 `json:"max_favourable_pct"`
 	MaxAdversePct    float64 `json:"max_adverse_pct"`
 
+	// SpreadPct is the quote width at entry, frozen with the rest of the
+	// signal since it is what the round trip will be charged for.
+	SpreadPct float64 `json:"spread_pct"`
+
 	ClosedAt             string  `json:"closed_at,omitempty"`
 	ClosedMinutes        int     `json:"closed_minutes_from_open,omitempty"`
 	ExitPrice            float64 `json:"exit_price,omitempty"`
@@ -57,17 +63,28 @@ type PaperPosition struct {
 	ReturnPct            float64 `json:"return_pct"`
 	PnL                  float64 `json:"pnl"`
 	AdverseBeforeExitPct float64 `json:"adverse_before_exit_pct"`
+
+	// Net of friction, which is the only version a real account would see.
+	CostPct      float64 `json:"cost_pct"`
+	NetReturnPct float64 `json:"net_return_pct"`
+	NetPnL       float64 `json:"net_pnl"`
 }
 
 // Ledger is the session's paper book, rewritten on every tick.
 type Ledger struct {
-	SessionDate   string  `json:"session_date"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
-	ScanPhase     string  `json:"scan_phase"`
-	ExitReference string  `json:"exit_reference"`
-	ExitTargetPct float64 `json:"exit_target_pct"`
-	Ticks         int     `json:"ticks"`
+	SessionDate string `json:"session_date"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	ScanPhase   string `json:"scan_phase"`
+
+	// How targets were sized when the book was opened, kept so a ledger read
+	// back later explains its own target prices.
+	ExitReference  string  `json:"exit_reference"`
+	ExitTargetMode string  `json:"exit_target_mode"`
+	ExitTargetATR  float64 `json:"exit_target_atr"`
+	ExitTargetPct  float64 `json:"exit_target_pct"`
+
+	Ticks int `json:"ticks"`
 
 	Positions []PaperPosition `json:"positions"`
 }
@@ -162,12 +179,14 @@ func (s *Scanner) openBook(session TradingSession) (*Ledger, error) {
 
 	minutes := int(session.Now.Sub(session.Open).Minutes())
 	ledger := &Ledger{
-		SessionDate:   session.Date,
-		CreatedAt:     session.Now.Format(time.RFC3339),
-		UpdatedAt:     session.Now.Format(time.RFC3339),
-		ScanPhase:     scan.Phase,
-		ExitReference: s.cfg.ExitReference,
-		ExitTargetPct: s.cfg.ExitTargetPct,
+		SessionDate:    session.Date,
+		CreatedAt:      session.Now.Format(time.RFC3339),
+		UpdatedAt:      session.Now.Format(time.RFC3339),
+		ScanPhase:      scan.Phase,
+		ExitReference:  s.cfg.ExitReference,
+		ExitTargetMode: s.cfg.ExitTargetMode,
+		ExitTargetATR:  s.cfg.ExitTargetATR,
+		ExitTargetPct:  s.cfg.ExitTargetPct,
 	}
 
 	for _, c := range buys {
@@ -177,10 +196,7 @@ func (s *Scanner) openBook(session TradingSession) (*Ledger, error) {
 			continue
 		}
 
-		reference := entry
-		if s.cfg.ExitReference == ExitRefPrevClose && c.PrevClose > 0 {
-			reference = c.PrevClose
-		}
+		targetPrice, targetPct, targetBasis := s.cfg.resolveTarget(c, entry)
 
 		ledger.Positions = append(ledger.Positions, PaperPosition{
 			Symbol:          c.Symbol,
@@ -189,7 +205,9 @@ func (s *Scanner) openBook(session TradingSession) (*Ledger, error) {
 			EntryPrice:      entry,
 			Shares:          s.cfg.PositionNotional / entry,
 			Notional:        s.cfg.PositionNotional,
-			TargetPrice:     reference * (1 + s.cfg.ExitTargetPct/100),
+			TargetPrice:     targetPrice,
+			TargetPct:       targetPct,
+			TargetBasis:     targetBasis,
 			ExitReference:   s.cfg.ExitReference,
 			Direction:       c.Direction,
 			PrevClose:       c.PrevClose,
@@ -200,6 +218,7 @@ func (s *Scanner) openBook(session TradingSession) (*Ledger, error) {
 			DiscoveredAt:    c.DiscoveredAt,
 			SeenPremarket:   c.SeenPremarket,
 			PremarketVolume: c.PremarketVolume,
+			SpreadPct:       c.SpreadPct,
 			Status:          PositionOpen,
 			LastPrice:       entry,
 			LastSampledAt:   session.Now.Format(time.RFC3339),
@@ -311,6 +330,10 @@ func (s *Scanner) advance(
 	if p.Status == PositionClosed {
 		p.ReturnPct = pctChange(p.EntryPrice, p.ExitPrice)
 		p.PnL = (p.ExitPrice - p.EntryPrice) * p.Shares
+		p.CostPct = s.cfg.Costs.RoundTripCostPct(
+			p.EntryPrice, p.ExitPrice, p.SpreadPct, marketCrossings(p.ExitReason))
+		p.NetReturnPct = p.ReturnPct - p.CostPct
+		p.NetPnL = p.PnL - p.CostPct/100*p.EntryPrice*p.Shares
 	}
 
 	if sample.High == 0 {
@@ -370,17 +393,19 @@ func (s *Scanner) minuteBars(symbols []string, start, end time.Time) (map[string
 // PrintLedger summarises the current paper book.
 func PrintLedger(l *Ledger, samples []PositionSample) {
 	closed := len(l.Positions) - l.Open()
-	fmt.Printf("\nPaper book  session=%s  tick=%d  open=%d  closed=%d  target=%s +%.2f%%\n\n",
-		l.SessionDate, l.Ticks, l.Open(), closed, l.ExitReference, l.ExitTargetPct)
+	fmt.Printf("\nPaper book  session=%s  tick=%d  open=%d  closed=%d  target=%s\n\n",
+		l.SessionDate, l.Ticks, l.Open(), closed, l.targetDescription())
 
-	var realised, unrealised float64
-	fmt.Printf("%-8s %-7s %9s %9s %9s %8s %8s %13s\n",
-		"SYMBOL", "STATUS", "ENTRY", "TARGET", "LAST", "RET%", "MAE%", "EXIT")
+	var realised, realisedNet, unrealised float64
+	fmt.Printf("%-8s %-7s %9s %9s %9s %8s %8s %-10s %8s %8s %8s %13s\n",
+		"SYMBOL", "STATUS", "ENTRY", "TARGET", "LAST", "SPREAD%", "TGT%", "BASIS",
+		"RET%", "COST%", "NET%", "EXIT")
 	for _, p := range l.Positions {
 		exit := "-"
 		if p.Status == PositionClosed {
 			exit = fmt.Sprintf("%s+%dm", p.ExitReason, p.ClosedMinutes)
 			realised += p.PnL
+			realisedNet += p.NetPnL
 		} else {
 			unrealised += (p.LastPrice - p.EntryPrice) * p.Shares
 		}
@@ -388,12 +413,23 @@ func PrintLedger(l *Ledger, samples []PositionSample) {
 		if p.Status == PositionOpen {
 			ret = pctChange(p.EntryPrice, p.LastPrice)
 		}
-		fmt.Printf("%-8s %-7s %9.2f %9.2f %9.2f %8.3f %8.2f %13s\n",
-			p.Symbol, p.Status, p.EntryPrice, p.TargetPrice, p.LastPrice, ret, p.MaxAdversePct, exit)
+		fmt.Printf("%-8s %-7s %9.2f %9.2f %9.2f %8s %8.3f %-10s %8.3f %8.3f %8.3f %13s\n",
+			p.Symbol, p.Status, p.EntryPrice, p.TargetPrice, p.LastPrice,
+			formatSpread(p.SpreadPct), p.TargetPct, p.TargetBasis,
+			ret, p.CostPct, p.NetReturnPct, exit)
 	}
 
-	fmt.Printf("\nrealised P&L $%.2f   unrealised $%.2f   total $%.2f   (notional $%.0f/position)\n\n",
-		realised, unrealised, realised+unrealised, l.positionNotional())
+	fmt.Printf("\nrealised P&L $%.2f gross / $%.2f net   unrealised $%.2f (gross)   (notional $%.0f/position)\n\n",
+		realised, realisedNet, unrealised, l.positionNotional())
+}
+
+// targetDescription renders the sizing rule the book was opened under, since
+// under ATR sizing there is no single target percentage to print.
+func (l *Ledger) targetDescription() string {
+	if l.ExitTargetMode == ExitTargetModeATR {
+		return fmt.Sprintf("%s +%.2f x ATR", l.ExitReference, l.ExitTargetATR)
+	}
+	return fmt.Sprintf("%s +%.2f%%", l.ExitReference, l.ExitTargetPct)
 }
 
 func (l *Ledger) positionNotional() float64 {
