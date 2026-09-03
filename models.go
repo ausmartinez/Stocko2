@@ -86,6 +86,26 @@ type ScannerConfig struct {
 	// Empty uses the built-in range.
 	SweepATRMultiples []float64 `json:"sweep_atr_multiples"`
 
+	// Swing simulation: multi-day holds scored from daily bars only, so it
+	// needs no real-time subscription and runs alongside the intraday path
+	// rather than replacing it.
+	//
+	// SwingEntry is "session_close" (buy the gap day's close) or "next_open".
+	SwingEntry       string  `json:"swing_entry"`
+	SwingHorizonDays []int   `json:"swing_horizon_days"`
+	SwingTargetATR   float64 `json:"swing_target_atr"`
+	SwingStopATR     float64 `json:"swing_stop_atr"`
+	SwingMaxHoldDays int     `json:"swing_max_hold_days"`
+
+	// NewsLookbackHours is the window before the open searched for the story
+	// that caused the gap. News-driven gaps and quiet ones behave differently,
+	// so this is the tag that separates them.
+	NewsLookbackHours int `json:"news_lookback_hours"`
+
+	// Grid for -swing-sweep: holding periods against target multiples.
+	SwingSweepDays      []int     `json:"swing_sweep_days"`
+	SwingSweepTargetATR []float64 `json:"swing_sweep_target_atr"`
+
 	// Costs charged against every simulated round trip, so the reported
 	// return is net of the friction a real fill would have paid.
 	Costs CostModel `json:"costs"`
@@ -154,6 +174,15 @@ func DefaultScannerConfig() ScannerConfig {
 		ExitTargetPct:          0.1,
 		MinTargetCostMult:      2.0,
 		Costs:                  DefaultCostModel(),
+
+		SwingEntry:          SwingEntrySessionClose,
+		SwingHorizonDays:    []int{1, 2, 3, 5, 10, 20},
+		SwingTargetATR:      2.0,
+		SwingStopATR:        1.0,
+		SwingMaxHoldDays:    10,
+		NewsLookbackHours:   24,
+		SwingSweepDays:      []int{1, 2, 3, 5, 10, 20},
+		SwingSweepTargetATR: []float64{0.5, 1.0, 1.5, 2.0, 3.0, 4.0},
 
 		PositionNotional:           1000,
 		CloseAllMinutesBeforeClose: 5,
@@ -263,5 +292,29 @@ func applyScannerDefaults(cfg *ScannerConfig) {
 	}
 	if cfg.ExportDir == "" {
 		cfg.ExportDir = d.ExportDir
+	}
+	if cfg.SwingEntry == "" {
+		cfg.SwingEntry = d.SwingEntry
+	}
+	if len(cfg.SwingHorizonDays) == 0 {
+		cfg.SwingHorizonDays = d.SwingHorizonDays
+	}
+	if cfg.SwingTargetATR <= 0 {
+		cfg.SwingTargetATR = d.SwingTargetATR
+	}
+	if cfg.SwingStopATR <= 0 {
+		cfg.SwingStopATR = d.SwingStopATR
+	}
+	if cfg.SwingMaxHoldDays <= 0 {
+		cfg.SwingMaxHoldDays = d.SwingMaxHoldDays
+	}
+	if cfg.NewsLookbackHours <= 0 {
+		cfg.NewsLookbackHours = d.NewsLookbackHours
+	}
+	if len(cfg.SwingSweepDays) == 0 {
+		cfg.SwingSweepDays = d.SwingSweepDays
+	}
+	if len(cfg.SwingSweepTargetATR) == 0 {
+		cfg.SwingSweepTargetATR = d.SwingSweepTargetATR
 	}
 }

@@ -258,8 +258,12 @@ func main() {
 		"flatten collected JSON into candidates.csv and samples.csv")
 	sweep := flag.Bool("sweep", false,
 		"replay collected outcomes against a range of ATR target multiples to find the best expectancy")
+	swing := flag.Bool("swing", false,
+		"score scanned sessions over multi-day horizons from daily bars, tagging news-driven gaps")
+	swingSweep := flag.Bool("swing-sweep", false,
+		"replay swing paths across a grid of holding periods and ATR target multiples")
 	date := flag.String("date", "",
-		"session date YYYY-MM-DD for -outcomes, -export and -sweep (default: most recent / all)")
+		"session date YYYY-MM-DD for -outcomes, -export, -sweep, -swing and -swing-sweep (default: most recent / all)")
 	flag.Parse()
 
 	logFile := setupLogging()
@@ -310,6 +314,14 @@ func main() {
 	case *sweep:
 		if err := runSweep(config.Scanner, *date); err != nil {
 			log.Fatalf("Sweep failed: %v", err)
+		}
+	case *swingSweep:
+		if err := runSwingSweep(config.Scanner, *date); err != nil {
+			log.Fatalf("Swing sweep failed: %v", err)
+		}
+	case *swing:
+		if err := runSwing(client, config.Scanner, *date); err != nil {
+			log.Fatalf("Swing scoring failed: %v", err)
 		}
 	case *outcomes:
 		if err := runOutcomes(client, config.Scanner, *date); err != nil {
