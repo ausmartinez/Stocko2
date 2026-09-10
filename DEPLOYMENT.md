@@ -2,7 +2,7 @@
 
 Paper only. `main.go` hardcodes `paper-api.alpaca.markets` and submits no orders.
 
-Assumes user `ghost` at `/home/ghost/stocko2` — adjust paths if yours differ.
+Assumes user `ghost` at `/home/ghost/Stocko2` — adjust paths if yours differ.
 
 ## 1. Setup
 
@@ -17,7 +17,7 @@ go version    # must be >= 1.26.3
 ```
 
 ```bash
-cd /home/ghost/stocko2
+cd /home/ghost/Stocko2
 go build -o stocko2 .     # build ON this box; a macOS binary will not run
 mkdir -p logs             # REQUIRED — cron's >> will not create it (§10)
 cat .env                  # APCA_API_KEY_ID, APCA_API_SECRET_KEY
@@ -59,6 +59,10 @@ If you can't change the system zone, put `CRON_TZ=America/New_York` at the top o
 
 Use `&&`, not `;` — a failed `cd` must abort, not run in the wrong place.
 
+Paths are **case-sensitive** on Linux. `git clone` of `Stocko2.git` produces
+`Stocko2`, not `stocko2`. Verify with `ls -d /home/ghost/Stocko2` before
+installing the crontab; macOS is case-insensitive, so this only bites here.
+
 ## 4. Crontab
 
 Times below are **Eastern**, matching §2. Market = 09:30–16:00 ET.
@@ -69,30 +73,30 @@ MAILTO=""
 # ─── Stocko2 (Eastern times; market 09:30-16:00) ───
 
 # Pre-market scan
-0 9 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 >> logs/scan.log 2>&1
+0 9 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 >> logs/scan.log 2>&1
 
 # Open scan. Writes open.json, which the tracker reads.
-31 9 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 >> logs/scan.log 2>&1
+31 9 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 >> logs/scan.log 2>&1
 
 # Tracking: first tick opens the book at 09:35
-35,40,45,50,55 9 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -track >> logs/track.log 2>&1
+35,40,45,50,55 9 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -track >> logs/track.log 2>&1
 # then every 5 min to 15:55 — that last tick flattens the book
-*/5 10-15 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -track >> logs/track.log 2>&1
+*/5 10-15 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -track >> logs/track.log 2>&1
 
 # Score the session
-30 16 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -outcomes >> logs/outcomes.log 2>&1
+30 16 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -outcomes >> logs/outcomes.log 2>&1
 
 # CSV
-45 16 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -export >> logs/export.log 2>&1
+45 16 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -export >> logs/export.log 2>&1
 
 # Intraday target sweep (local files only)
-0 17 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -sweep >> logs/sweep.log 2>&1
+0 17 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -sweep >> logs/sweep.log 2>&1
 
 # Swing scoring. Idempotent; horizons fill in as days elapse.
-15 17 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -swing >> logs/swing.log 2>&1
+15 17 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -swing >> logs/swing.log 2>&1
 
 # Swing grid (local files only)
-30 17 * * 1-5 cd /home/ghost/stocko2 && ./stocko2 -swing-sweep >> logs/swing-sweep.log 2>&1
+30 17 * * 1-5 cd /home/ghost/Stocko2 && ./stocko2 -swing-sweep >> logs/swing-sweep.log 2>&1
 ```
 
 Install with `crontab -e`. `MAILTO=""` stops cron mailing every run's output to a box with no MTA.
@@ -139,7 +143,7 @@ data/export/candidates.csv samples.csv
 Rotate with logrotate — `/etc/logrotate.d/stocko2`:
 
 ```
-/home/ghost/stocko2/app.log /home/ghost/stocko2/logs/*.log {
+/home/ghost/Stocko2/app.log /home/ghost/Stocko2/logs/*.log {
     monthly
     rotate 12
     compress
@@ -164,7 +168,7 @@ A server doesn't sleep, so there's no missed-wakeup problem. If you'd rather not
 ## 9. Verify
 
 ```bash
-cd /home/ghost/stocko2
+cd /home/ghost/Stocko2
 tail -f app.log
 ls -la data/$(date +%F)/
 
@@ -193,7 +197,7 @@ Startup order is `setupLogging` → `.env` → `GetAccount` → `loadConfig`
 `config.json` only appears once the account check passes.
 
 ```bash
-cd /home/ghost/stocko2
+cd /home/ghost/Stocko2
 ls -la                       # logs/? config.json? stocko2 executable?
 cat app.log                  # the real error lives here
 grep CRON /var/log/syslog | tail -20
@@ -208,6 +212,7 @@ file stocko2                 # must be ELF, not Mach-O
 | `Failed to get account: unauthorized. (HTTP 401)` | Keys rejected. If there is **no** `No .env file loaded` line above it, the file parsed fine and the credentials themselves are dead — regenerate them (below) |
 | `No .env file loaded` then 401 | The file wasn't found in the working directory |
 | No `config.json` | Died at or before `GetAccount` — it is created *after* the account check |
+| cron logs the CMD but `app.log` is untouched | The `cd` failed, so `&&` correctly aborted. **Check capitalisation** — a clone of `Stocko2.git` makes `Stocko2`, and Linux is case-sensitive where macOS is not. Also check `logs/` exists: the shell opens the redirect before running the binary |
 | No `app.log` at all | Binary never executed — check syslog, `file`, and `chmod +x` |
 | `data/` missing after a clean run | Scan found nothing, or `scanner.enabled: false` |
 
@@ -220,7 +225,7 @@ Isolates the keys from the app. Run it on both machines — if they fail here to
 the problem is the keys, not the deployment.
 
 ```bash
-cd /home/ghost/stocko2
+cd /home/ghost/Stocko2
 KEY=$(grep -E '^APCA_API_KEY_ID='     .env | cut -d= -f2- | tr -d '"'"'"' \r')
 SEC=$(grep -E '^APCA_API_SECRET_KEY=' .env | cut -d= -f2- | tr -d '"'"'"' \r')
 curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
