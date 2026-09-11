@@ -282,7 +282,9 @@ func main() {
 		BaseURL:   "https://paper-api.alpaca.markets",
 	})
 
-	account, err := client.GetAccount()
+	// Every mode starts here, so a transient 5xx would otherwise kill the run
+	// before it began. A 401 is not transient and still fails immediately.
+	account, err := retryTransient("account", client.GetAccount)
 	if err != nil {
 		log.Fatalf("Failed to get account: %v", err)
 	}

@@ -58,16 +58,19 @@ func ResolveSession(client *alpaca.Client, premarketStartET string) (TradingSess
 		return TradingSession{}, err
 	}
 
-	clock, err := client.GetClock()
+	clock, err := retryTransient("market clock", client.GetClock)
 	if err != nil {
 		return TradingSession{}, fmt.Errorf("getting market clock: %w", err)
 	}
 	now := clock.Timestamp.In(loc)
 
 	// A window either side of today covers weekends and long holiday breaks.
-	days, err := client.GetCalendar(alpaca.GetCalendarRequest{
+	req := alpaca.GetCalendarRequest{
 		Start: now.AddDate(0, 0, -7),
 		End:   now.AddDate(0, 0, 7),
+	}
+	days, err := retryTransient("market calendar", func() ([]alpaca.CalendarDay, error) {
+		return client.GetCalendar(req)
 	})
 	if err != nil {
 		return TradingSession{}, fmt.Errorf("getting market calendar: %w", err)
@@ -140,15 +143,18 @@ func calendarAround(client *alpaca.Client, day time.Time) ([]alpaca.CalendarDay,
 		return nil, time.Time{}, err
 	}
 
-	clock, err := client.GetClock()
+	clock, err := retryTransient("market clock", client.GetClock)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("getting market clock: %w", err)
 	}
 	now := clock.Timestamp.In(loc)
 
-	days, err := client.GetCalendar(alpaca.GetCalendarRequest{
+	req := alpaca.GetCalendarRequest{
 		Start: day.AddDate(0, 0, -14),
 		End:   day.AddDate(0, 0, 7),
+	}
+	days, err := retryTransient("market calendar", func() ([]alpaca.CalendarDay, error) {
+		return client.GetCalendar(req)
 	})
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("getting market calendar: %w", err)
