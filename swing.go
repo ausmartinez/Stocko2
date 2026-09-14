@@ -180,37 +180,56 @@ func (s *Scanner) CollectSwingOutcomes(
 	return outcomes, tracks, nil
 }
 
-// forwardDailyBars pulls daily bars from the gap session forward far enough to
-// cover the longest horizon, allowing for weekends and holidays.
-func (s *Scanner) forwardDailyBars(
-	symbols []string, session TradingSession,
-) (map[string][]marketdata.Bar, error) {
+// forwardBarWindow is the range forwardDailyBars requests.
+//
+// The start must be MIDNIGHT ET of the session date, not session.Open. Alpaca
+// stamps a daily bar at 00:00 ET, so starting at the 09:30 open silently
+// excludes the gap day's own bar — scoreSwing then cannot find gapIdx and every
+// session scores nothing.
+func (s *Scanner) forwardBarWindow(session TradingSession) (time.Time, time.Time, error) {
+	start, err := parseETTime(s.loc, session.Date, "00:00")
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
 	span := s.cfg.SwingMaxHoldDays
 	for _, h := range s.cfg.SwingHorizonDays {
 		span = max(span, h)
 	}
 	// Trading days to calendar days, plus slack for holiday clusters.
-	end := session.Open.AddDate(0, 0, span*2+10)
+	end := start.AddDate(0, 0, span*2+10)
 
 	// Stay clear of the last 15 minutes, which SIP does not serve on the free
 	// plan. Only completed sessions matter here, so this costs nothing.
 	if cutoff := time.Now().Add(-16 * time.Minute); end.After(cutoff) {
 		end = cutoff
 	}
-	if !end.After(session.Open) {
+	return start, end, nil
+}
+
+// forwardDailyBars pulls daily bars from the gap session forward far enough to
+// cover the longest horizon, allowing for weekends and holidays.
+func (s *Scanner) forwardDailyBars(
+	symbols []string, session TradingSession,
+) (map[string][]marketdata.Bar, error) {
+	start, end, err := s.forwardBarWindow(session)
+	if err != nil {
+		return nil, err
+	}
+	if !end.After(start) {
 		return map[string][]marketdata.Bar{}, nil
 	}
 
 	out := make(map[string][]marketdata.Bar, len(symbols))
 	var mu sync.Mutex
 
-	err := s.forEachBatch(symbols, s.cfg.HistoryBatchSize, func(batch []string) error {
+	err = s.forEachBatch(symbols, s.cfg.HistoryBatchSize, func(batch []string) error {
 		bars, err := s.data.GetMultiBars(batch, marketdata.GetBarsRequest{
 			TimeFrame: marketdata.OneDay,
 			// A split inside the holding window would otherwise read as a
 			// catastrophic loss.
 			Adjustment: marketdata.AdjustmentAll,
-			Start:      session.Open,
+			Start:      start,
 			End:        end,
 			Feed:       s.cfg.Feed,
 		})
@@ -538,12 +557,12 @@ func PrintSwing(sessionDate string, outcomes []SwingOutcome, cfg ScannerConfig) 
 			o.TargetPct, o.StopPct, o.ExitDay, o.NetStrategyReturnPct, o.MaxFavourablePct)
 	}
 
-	printSwingSplits(outcomes)
+	printSwingSplits(outcomes, cfg)
 }
 
 // printSwingSplits reports the buckets the drift-versus-reversal question turns
 // on: whether the gap had a story behind it, and which way it gapped.
-func printSwingSplits(outcomes []SwingOutcome) {
+func printSwingSplits(outcomes []SwingOutcome, cfg ScannerConfig) {
 	var flagged []SwingOutcome
 	for _, o := range outcomes {
 		if o.Flagged && !o.Faded {
@@ -586,6 +605,19 @@ func printSwingSplits(outcomes []SwingOutcome) {
 	if all.Immature > 0 {
 		fmt.Printf("\n%d trades are still open (not enough days elapsed) and are excluded above\n",
 			all.Immature)
+	}
+
+	// No time stop anywhere means the forward data is shorter than the holding
+	// period, so every *finished* trade finished by hitting a barrier. That set
+	// is selected toward whichever barrier is nearer — with a 1x ATR stop under
+	// a 2x ATR target, overwhelmingly the stop. The averages above are an
+	// artifact of the window, not an estimate of expectancy.
+	if all.Trades > 0 && all.TimeStop == 0 && all.Immature > 0 {
+		fmt.Printf("\nWARNING: no trade reached the %d-day time stop, so every finished trade\n"+
+			"exited on a barrier. That set is selected toward the nearer barrier — with a\n"+
+			"%.2fx ATR stop under a %.2fx ATR target, overwhelmingly the stop. Backfill at\n"+
+			"least %d more trading days past the last session before reading these numbers.\n",
+			cfg.SwingMaxHoldDays, cfg.SwingStopATR, cfg.SwingTargetATR, cfg.SwingMaxHoldDays)
 	}
 	if all.Ambiguous > 0 {
 		fmt.Printf("%d/%d exits hit the target and the stop on the same day; daily bars cannot "+
@@ -664,7 +696,7 @@ func runSwing(client *alpaca.Client, cfg ScannerConfig, date string) error {
 	if date == "" && len(everything) > 0 {
 		fmt.Printf("\nSwing scoring across %d sessions  entry=%s  target=%.2f x ATR  stop=%.2f x ATR  max hold=%dd\n",
 			scored, cfg.SwingEntry, cfg.SwingTargetATR, cfg.SwingStopATR, cfg.SwingMaxHoldDays)
-		printSwingSplits(everything)
+		printSwingSplits(everything, cfg)
 		fmt.Println("note: run -swing-sweep to vary the holding period and target together")
 	}
 	return nil

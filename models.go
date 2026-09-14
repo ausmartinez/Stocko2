@@ -106,6 +106,10 @@ type ScannerConfig struct {
 	SwingSweepDays      []int     `json:"swing_sweep_days"`
 	SwingSweepTargetATR []float64 `json:"swing_sweep_target_atr"`
 
+	// BackfillDays is how far back -backfill reaches when no -from or -days is
+	// given, so changing the window is a config edit rather than a date sum.
+	BackfillDays int `json:"backfill_days"`
+
 	// Costs charged against every simulated round trip, so the reported
 	// return is net of the friction a real fill would have paid.
 	Costs CostModel `json:"costs"`
@@ -183,6 +187,7 @@ func DefaultScannerConfig() ScannerConfig {
 		NewsLookbackHours:   24,
 		SwingSweepDays:      []int{1, 2, 3, 5, 10, 20},
 		SwingSweepTargetATR: []float64{0.5, 1.0, 1.5, 2.0, 3.0, 4.0},
+		BackfillDays:        30,
 
 		PositionNotional:           1000,
 		CloseAllMinutesBeforeClose: 5,
@@ -316,5 +321,8 @@ func applyScannerDefaults(cfg *ScannerConfig) {
 	}
 	if len(cfg.SwingSweepTargetATR) == 0 {
 		cfg.SwingSweepTargetATR = d.SwingSweepTargetATR
+	}
+	if cfg.BackfillDays <= 0 {
+		cfg.BackfillDays = d.BackfillDays
 	}
 }

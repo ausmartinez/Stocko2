@@ -270,6 +270,54 @@ func TestLedgerRoundTrip(t *testing.T) {
 
 // The CSV header and each record must stay the same width, or every column
 // silently shifts.
+// An unflattened position must not override the simulated outcome, or a missed
+// 15:55 tick silently zeroes the exit and return for every open row.
+func TestApplyLedgerIgnoresPositionsThatNeverClosed(t *testing.T) {
+	simulated := Outcome{
+		Symbol:            "AAA",
+		EntryPrice:        100,
+		ExitPrice:         103,
+		ExitReason:        ExitReasonClose,
+		StrategyReturnPct: 3.0,
+		CloseReturnPct:    3.0,
+	}
+
+	t.Run("open position is skipped", func(t *testing.T) {
+		r := exportRow{Symbol: "AAA"}
+		applyLedger(&r, PaperPosition{Symbol: "AAA", Status: PositionOpen, EntryPrice: 100})
+		applyOutcome(&r, simulated)
+
+		if r.Source != "outcome" {
+			t.Errorf("source = %q, want the simulated outcome to win", r.Source)
+		}
+		if math.Abs(r.ReturnPct-3.0) > 1e-9 {
+			t.Errorf("return = %v, want the simulated 3.0", r.ReturnPct)
+		}
+		if r.ExitReason != ExitReasonClose {
+			t.Errorf("exit_reason = %q, want it filled from the outcome", r.ExitReason)
+		}
+	})
+
+	t.Run("closed position still wins", func(t *testing.T) {
+		r := exportRow{Symbol: "AAA"}
+		applyLedger(&r, PaperPosition{
+			Symbol: "AAA", Status: PositionClosed, EntryPrice: 100,
+			ExitPrice: 101, ExitReason: ExitReasonTarget, ReturnPct: 1.0, PnL: 10,
+		})
+		applyOutcome(&r, simulated)
+
+		if r.Source != "ledger" {
+			t.Errorf("source = %q, want the live ledger to win", r.Source)
+		}
+		if math.Abs(r.ReturnPct-1.0) > 1e-9 {
+			t.Errorf("return = %v, want the live 1.0", r.ReturnPct)
+		}
+		if !r.HitTarget {
+			t.Error("hit_target should be set from the ledger")
+		}
+	})
+}
+
 func TestExportHeaderMatchesRecord(t *testing.T) {
 	got := len(exportRow{}.record())
 	if got != len(exportHeader) {

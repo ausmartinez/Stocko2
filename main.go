@@ -262,6 +262,20 @@ func main() {
 		"score scanned sessions over multi-day horizons from daily bars, tagging news-driven gaps")
 	swingSweep := flag.Bool("swing-sweep", false,
 		"replay swing paths across a grid of holding periods and ATR target multiples")
+	backfill := flag.Bool("backfill", false,
+		"reconstruct past open-phase scans from daily bars, so the scorers have history to work with")
+	from := flag.String("from", "",
+		"start date YYYY-MM-DD for -backfill (overrides -days)")
+	to := flag.String("to", "",
+		"end date YYYY-MM-DD for -backfill (default: the last completed session)")
+	days := flag.Int("days", 0,
+		"how many days back -backfill reaches from the end of the window (default: scanner.backfill_days)")
+	premarket := flag.Bool("premarket", false,
+		"reconstruct the pre-market pass too, recovering faded and gap_delta_pct; adds a minute-bar sweep per day")
+	force := flag.Bool("force", false,
+		"let -backfill overwrite sessions that already have a scan")
+	feed := flag.String("feed", "",
+		"override scanner.feed for this run only; use sip for -backfill, which is free on historical data")
 	date := flag.String("date", "",
 		"session date YYYY-MM-DD for -outcomes, -export, -sweep, -swing and -swing-sweep (default: most recent / all)")
 	flag.Parse()
@@ -303,6 +317,13 @@ func main() {
 	}
 	log.Printf("Application Loaded: %s (v%s) | Debug Mode: %t\n", config.AppName, config.Version, config.Debug)
 
+	// A per-run override, because historical SIP is free while realtime SIP is
+	// not: the backfill wants sip even when the live scans must stay on iex.
+	if *feed != "" {
+		log.Printf("feed overridden for this run: %s (config says %s)", *feed, config.Scanner.Feed)
+		config.Scanner.Feed = *feed
+	}
+
 	if !config.Scanner.Enabled {
 		log.Println("Scanner disabled in config, nothing to do.")
 		return
@@ -324,6 +345,10 @@ func main() {
 	case *swing:
 		if err := runSwing(client, config.Scanner, *date); err != nil {
 			log.Fatalf("Swing scoring failed: %v", err)
+		}
+	case *backfill:
+		if err := runBackfill(client, config.Scanner, *from, *to, *days, *force, *premarket); err != nil {
+			log.Fatalf("Backfill failed: %v", err)
 		}
 	case *outcomes:
 		if err := runOutcomes(client, config.Scanner, *date); err != nil {

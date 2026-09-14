@@ -338,6 +338,14 @@ func rowFromCandidate(date, phase string, c GapCandidate) exportRow {
 }
 
 func applyLedger(r *exportRow, p PaperPosition) {
+	// A position that never closed is not a completed trade. Letting it win
+	// over the simulated outcome would write an empty exit reason and a zero
+	// return, silently masking what the symbol actually did — which is what a
+	// missed flatten tick or a crashed session would otherwise produce.
+	if p.Status != PositionClosed {
+		return
+	}
+
 	r.Source = "ledger"
 	r.EntryPrice = p.EntryPrice
 	r.TargetPrice = p.TargetPrice

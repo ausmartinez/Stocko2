@@ -428,3 +428,53 @@ func TestApplyScannerDefaultsFillsSwingSettings(t *testing.T) {
 		t.Error("swing horizon or sweep grids left empty")
 	}
 }
+
+// Alpaca stamps a daily bar at midnight ET. Requesting from session.Open (09:30)
+// silently drops the gap day's own bar, which leaves scoreSwing unable to find
+// gapIdx and scores every session as empty. This pins the window.
+func TestForwardBarWindowStartsAtMidnightNotTheOpen(t *testing.T) {
+	s := testScanner(t, swingTestConfig())
+	session := testSession(t, "16:30") // dated 2026-09-02
+
+	start, end, err := s.forwardBarWindow(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := start.In(s.loc).Format("2006-01-02 15:04"); got != "2026-09-02 00:00" {
+		t.Errorf("start = %s, want midnight ET of the session date", got)
+	}
+	if !start.Before(session.Open) {
+		t.Error("start must precede the 09:30 open, or the gap day's bar is excluded")
+	}
+	// A bar stamped at midnight ET must fall inside the requested range.
+	bar := dailyBar(t, session.Date, 100, 101, 99, 100)
+	if bar.Timestamp.Before(start) {
+		t.Errorf("the session's own daily bar (%s) falls before start (%s)",
+			bar.Timestamp.Format(time.RFC3339), start.Format(time.RFC3339))
+	}
+	if !end.After(start) {
+		t.Errorf("end %s is not after start %s", end, start)
+	}
+}
+
+// The window must cover the longest horizon, not just the holding period.
+func TestForwardBarWindowCoversTheLongestHorizon(t *testing.T) {
+	cfg := swingTestConfig()
+	cfg.SwingMaxHoldDays = 5
+	cfg.SwingHorizonDays = []int{1, 2, 60}
+	s := testScanner(t, cfg)
+
+	// A session far enough back that the 15-minute cutoff cannot clamp it.
+	session := testSession(t, "16:30")
+	session.Date = "2020-01-06"
+	start, end, err := s.forwardBarWindow(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 60 trading days needs well over 60 calendar days of range.
+	if days := end.Sub(start).Hours() / 24; days < 60 {
+		t.Errorf("window spans %.0f days, too short for a 60-day horizon", days)
+	}
+}
