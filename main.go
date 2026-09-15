@@ -238,14 +238,16 @@ func appendSessionSamples(dataDir, date string, samples []PositionSample) error 
 
 // runExport flattens the collected JSON into CSV for regression work.
 func runExport(cfg ScannerConfig, date string) error {
-	rows, samples, err := ExportCSV(cfg.DataDir, date, cfg.ExportDir)
+	rows, samples, swing, err := ExportCSV(cfg.DataDir, date, cfg.ExportDir, cfg.SwingHorizonDays)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("export: wrote %d candidate rows and %d sample rows to %s", rows, samples, cfg.ExportDir)
-	fmt.Printf("\nExported to %s\n  candidates.csv  %d rows\n  samples.csv     %d rows\n\n",
-		cfg.ExportDir, rows, samples)
+	log.Printf("export: wrote %d candidate rows, %d sample rows and %d swing rows to %s",
+		rows, samples, swing, cfg.ExportDir)
+	fmt.Printf("\nExported to %s\n  candidates.csv  %d rows  (intraday)\n"+
+		"  swing.csv       %d rows  (multi-day, joined to the scan)\n"+
+		"  samples.csv     %d rows\n\n", cfg.ExportDir, rows, swing, samples)
 	return nil
 }
 

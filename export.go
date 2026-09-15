@@ -130,34 +130,34 @@ func u(v uint64) string  { return strconv.FormatUint(v, 10) }
 
 // ExportCSV walks the data directory and writes a flat candidates table plus a
 // long-format sample table. Passing a sessionDate limits it to one day.
-func ExportCSV(dataDir, sessionDate, outDir string) (int, int, error) {
+func ExportCSV(dataDir, sessionDate, outDir string, swingHorizons []int) (int, int, int, error) {
 	sessions, err := sessionDirs(dataDir, sessionDate)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if len(sessions) == 0 {
-		return 0, 0, fmt.Errorf("no session directories found under %s", dataDir)
+		return 0, 0, 0, fmt.Errorf("no session directories found under %s", dataDir)
 	}
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return 0, 0, fmt.Errorf("creating %s: %w", outDir, err)
+		return 0, 0, 0, fmt.Errorf("creating %s: %w", outDir, err)
 	}
 
 	candidates, err := os.Create(filepath.Join(outDir, "candidates.csv"))
 	if err != nil {
-		return 0, 0, fmt.Errorf("creating candidates.csv: %w", err)
+		return 0, 0, 0, fmt.Errorf("creating candidates.csv: %w", err)
 	}
 	defer candidates.Close()
 
 	cw := csv.NewWriter(candidates)
 	defer cw.Flush()
 	if err := cw.Write(exportHeader); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	samplesFile, err := os.Create(filepath.Join(outDir, "samples.csv"))
 	if err != nil {
-		return 0, 0, fmt.Errorf("creating samples.csv: %w", err)
+		return 0, 0, 0, fmt.Errorf("creating samples.csv: %w", err)
 	}
 	defer samplesFile.Close()
 
@@ -167,25 +167,25 @@ func ExportCSV(dataDir, sessionDate, outDir string) (int, int, error) {
 		"session_date", "symbol", "at", "minutes_from_open",
 		"price", "high", "low", "unrealized_pct", "status",
 	}); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	var rowCount, sampleCount int
 	for _, date := range sessions {
 		rows, err := buildExportRows(dataDir, date)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		for _, r := range rows {
 			if err := cw.Write(r.record()); err != nil {
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 			rowCount++
 		}
 
 		n, err := writeSamples(sw, dataDir, date)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		sampleCount += n
 	}
@@ -193,9 +193,14 @@ func ExportCSV(dataDir, sessionDate, outDir string) (int, int, error) {
 	cw.Flush()
 	sw.Flush()
 	if err := cw.Error(); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return rowCount, sampleCount, sw.Error()
+	if err := sw.Error(); err != nil {
+		return 0, 0, 0, err
+	}
+
+	swingCount, err := writeSwingCSV(dataDir, sessionDate, outDir, swingHorizons)
+	return rowCount, sampleCount, swingCount, err
 }
 
 // sessionDirs lists YYYY-MM-DD directories under the data directory.
@@ -447,4 +452,122 @@ func abs(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+// swingHeader and swingRecord are parallel slices, like exportHeader and
+// exportRow.record(). TestSwingHeaderMatchesRecord guards the pairing.
+//
+// The horizon columns are generated from SwingHorizonDays, so the header is
+// built per run rather than being a package-level constant.
+func swingHeader(horizons []int) []string {
+	h := []string{
+		"session_date", "symbol", "scan_phase", "flagged", "faded",
+		"direction", "methods", "method_count",
+		// Signal.
+		"prev_close", "entry_price", "atr", "atr_pct", "gap_pct", "abs_gap_pct",
+		"gap_atr", "gap_sigma", "spread_pct", "bid", "ask", "ref_source",
+		// Scan-only features the swing file does not carry.
+		"seen_premarket", "discovered_at", "projected_gap_pct", "gap_delta_pct",
+		"prev_volume", "avg_volume", "prev_volume_ratio",
+		"prev_day_return_pct", "prev_day_range_pct", "overnight_stdev_pct",
+		"premarket_volume", "premarket_volume_ratio", "premarket_range_pct",
+		// Why it gapped.
+		"has_news", "news_count", "looks_earnings",
+		// Bracket and outcome.
+		"entry_basis", "entry_date", "target_pct", "target_basis", "stop_pct",
+		"exit_reason", "exit_day", "ambiguous", "forward_bars",
+		"max_favourable_pct", "max_adverse_pct",
+		"strategy_return_pct", "cost_pct", "net_strategy_return_pct",
+	}
+	for _, d := range horizons {
+		h = append(h, fmt.Sprintf("ret_%dd", d))
+	}
+	return h
+}
+
+func swingRecord(o SwingOutcome, c GapCandidate, horizons []int) []string {
+	atrPct := 0.0
+	if o.EntryPrice > 0 {
+		atrPct = o.ATR / o.EntryPrice * 100
+	}
+
+	rec := []string{
+		o.SessionDate, o.Symbol, o.ScanPhase, b(o.Flagged), b(o.Faded),
+		o.Direction, strings.Join(o.Methods, "|"), strconv.Itoa(len(o.Methods)),
+		f(o.PrevClose), f(o.EntryPrice), f(o.ATR), f(atrPct), f(o.GapPct), f(abs(o.GapPct)),
+		f(o.GapATR), f(o.GapSigma), f(o.SpreadPct), f(c.Bid), f(c.Ask), c.RefSource,
+		b(c.SeenPremarket), c.DiscoveredAt, f(c.ProjectedGapPct), f(c.GapDeltaPct),
+		u(c.PrevVolume), u(c.AvgVolume), f(c.PrevVolumeRatio),
+		f(c.PrevDayReturnPct), f(c.PrevDayRangePct), f(c.OvernightStdevPct),
+		u(c.PremarketVolume), f(c.PremarketVolumeRatio), f(c.PremarketRangePct),
+		b(o.HasNews), strconv.Itoa(o.NewsCount), b(o.LooksEarning),
+		o.EntryBasis, o.EntryDate, f(o.TargetPct), o.TargetBasis, f(o.StopPct),
+		o.ExitReason, strconv.Itoa(o.ExitDay), b(o.Ambiguous), strconv.Itoa(o.ForwardBars),
+		f(o.MaxFavourablePct), f(o.MaxAdversePct),
+		f(o.StrategyReturnPct), f(o.CostPct), f(o.NetStrategyReturnPct),
+	}
+	for _, d := range horizons {
+		// An unreached horizon is written blank, not zero: a missing label must
+		// not read as a flat return.
+		if v, ok := o.ReturnPct[fmt.Sprintf("%dd", d)]; ok {
+			rec = append(rec, f(v))
+		} else {
+			rec = append(rec, "")
+		}
+	}
+	return rec
+}
+
+// writeSwingCSV joins each session's swing scoring to the scan that produced
+// it, so the modelling table carries the features the swing file drops —
+// gap_delta_pct and the pre-market ratios among them.
+func writeSwingCSV(dataDir, sessionDate, outDir string, horizons []int) (int, error) {
+	sessions, err := sessionDirs(dataDir, sessionDate)
+	if err != nil {
+		return 0, err
+	}
+
+	file, err := os.Create(filepath.Join(outDir, "swing.csv"))
+	if err != nil {
+		return 0, fmt.Errorf("creating swing.csv: %w", err)
+	}
+	defer file.Close()
+
+	w := csv.NewWriter(file)
+	defer w.Flush()
+	if err := w.Write(swingHeader(horizons)); err != nil {
+		return 0, err
+	}
+
+	rows := 0
+	for _, date := range sessions {
+		outcomes, err := LoadJSON[[]SwingOutcome](SwingFile(dataDir, date))
+		if err != nil {
+			return 0, err
+		}
+		if outcomes == nil {
+			continue
+		}
+		scan, err := loadAnyScan(dataDir, date)
+		if err != nil {
+			return 0, err
+		}
+
+		features := map[string]GapCandidate{}
+		if scan != nil {
+			for _, c := range scan.Candidates {
+				features[c.Symbol] = c
+			}
+		}
+
+		for _, o := range *outcomes {
+			if err := w.Write(swingRecord(o, features[o.Symbol], horizons)); err != nil {
+				return rows, err
+			}
+			rows++
+		}
+	}
+
+	w.Flush()
+	return rows, w.Error()
 }

@@ -413,7 +413,7 @@ func TestExportCSVWritesBothFiles(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "export")
-	rows, samples, err := ExportCSV(dir, "", out)
+	rows, samples, _, err := ExportCSV(dir, "", out, []int{1, 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,4 +450,126 @@ func splitLines(s string) []string {
 
 func countFields(line string) int {
 	return len(strings.Split(line, ","))
+}
+
+// swingHeader and swingRecord are parallel slices; a mismatch silently shifts
+// every column in the modelling table.
+func TestSwingHeaderMatchesRecord(t *testing.T) {
+	for _, horizons := range [][]int{nil, {1}, {1, 2, 3, 5, 10, 20}} {
+		h := len(swingHeader(horizons))
+		r := len(swingRecord(SwingOutcome{ReturnPct: map[string]float64{}}, GapCandidate{}, horizons))
+		if h != r {
+			t.Errorf("horizons=%v: header has %d columns, record has %d", horizons, h, r)
+		}
+	}
+}
+
+// An unreached horizon must be blank, not zero — a missing label read as a flat
+// return would bias every model fitted on it.
+func TestSwingRecordLeavesUnreachedHorizonsBlank(t *testing.T) {
+	horizons := []int{1, 5, 20}
+	o := SwingOutcome{ReturnPct: map[string]float64{"1d": 2.5, "5d": -1.0}}
+
+	rec := swingRecord(o, GapCandidate{}, horizons)
+	got := rec[len(rec)-3:]
+
+	if got[0] != "2.5" || got[1] != "-1" {
+		t.Errorf("reached horizons = %v, want 2.5 and -1", got[:2])
+	}
+	if got[2] != "" {
+		t.Errorf("unreached 20d horizon = %q, want empty", got[2])
+	}
+}
+
+// atr_pct is the derived column the analysis turns on, so it must be present
+// and correct rather than left to the caller.
+func TestSwingRecordDerivesATRPct(t *testing.T) {
+	cols := swingHeader(nil)
+	idx := -1
+	for i, c := range cols {
+		if c == "atr_pct" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatal("swing.csv has no atr_pct column")
+	}
+
+	rec := swingRecord(SwingOutcome{
+		ATR: 4, EntryPrice: 50, ReturnPct: map[string]float64{},
+	}, GapCandidate{}, nil)
+	if rec[idx] != "8" {
+		t.Errorf("atr_pct = %q, want 8 (4/50)", rec[idx])
+	}
+
+	// A zero entry price must not divide by zero.
+	rec = swingRecord(SwingOutcome{ATR: 4, ReturnPct: map[string]float64{}}, GapCandidate{}, nil)
+	if rec[idx] != "0" {
+		t.Errorf("atr_pct with no entry = %q, want 0", rec[idx])
+	}
+}
+
+// The join is the whole point: swing.json drops most of the scan's features.
+func TestWriteSwingCSVJoinsScanFeatures(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "export")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveScanResult(PhaseFile(dir, "2026-09-02", PhaseOpen), &ScanResult{
+		SessionDate: "2026-09-02", Phase: PhaseOpen,
+		Candidates: []GapCandidate{{
+			Symbol: "AAA", Methods: []string{MethodPercent},
+			SeenPremarket: true, DiscoveredAt: PhasePremarket,
+			GapDeltaPct: -1.75, PrevVolumeRatio: 3.2, Bid: 9.99, Ask: 10.01,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveJSON(SwingFile(dir, "2026-09-02"), []SwingOutcome{{
+		SessionDate: "2026-09-02", Symbol: "AAA", Flagged: true,
+		ATR: 1, EntryPrice: 20, ExitReason: ExitReasonTarget,
+		ReturnPct: map[string]float64{"1d": 3.0},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := writeSwingCSV(dir, "", out, []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("wrote %d rows, want 1", n)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(out, "swing.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(string(raw))
+	head, row := strings.Split(lines[0], ","), strings.Split(lines[1], ",")
+
+	for col, want := range map[string]string{
+		"gap_delta_pct":     "-1.75", // scan-only, absent from swing.json
+		"prev_volume_ratio": "3.2",   // scan-only
+		"seen_premarket":    "1",     // scan-only
+		"bid":               "9.99",  // scan-only
+		"atr_pct":           "5",     // derived: 1/20
+		"ret_1d":            "3",     // from the horizon map
+	} {
+		idx := -1
+		for i, h := range head {
+			if h == col {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			t.Errorf("no %s column", col)
+			continue
+		}
+		if row[idx] != want {
+			t.Errorf("%s = %q, want %q", col, row[idx], want)
+		}
+	}
 }

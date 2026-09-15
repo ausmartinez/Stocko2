@@ -43,6 +43,14 @@ type ScannerConfig struct {
 	ATRPeriod       int `json:"atr_period"`
 	MinSigmaSamples int `json:"min_sigma_samples"`
 
+	// MaxATRPct rejects symbols whose ATR is too large a fraction of their
+	// price. ATR-sized brackets become nonsense on those names — a 1x ATR stop
+	// on a stock whose ATR is half its price is a -50% stop. Zero disables it,
+	// which is what you want when collecting data for research rather than
+	// trading. Deliberately NOT back-filled by applyScannerDefaults, so an
+	// existing config keeps whatever it already says.
+	MaxATRPct float64 `json:"max_atr_pct"`
+
 	PremarketStartET   string `json:"premarket_start_et"` // ET, "HH:MM"
 	MinPremarketVolume uint64 `json:"min_premarket_volume"`
 
@@ -153,6 +161,7 @@ func DefaultScannerConfig() ScannerConfig {
 		HistoryDays:           120,
 		ATRPeriod:             14,
 		MinSigmaSamples:       30,
+		MaxATRPct:             10.0,
 		PremarketStartET:      "04:00",
 		MinPremarketVolume:    0,
 		UseAuctionOpen:        false,

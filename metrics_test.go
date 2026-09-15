@@ -358,3 +358,66 @@ func TestChunk(t *testing.T) {
 		t.Error("chunking nil should produce no batches")
 	}
 }
+
+// A name whose ATR is a large fraction of its price cannot be bracketed
+// sensibly — 1x ATR becomes a -50% stop — so it must not flag.
+func TestBuildCandidateRejectsExtremeATR(t *testing.T) {
+	// 30 quiet sessions at $10, then a wild one that leaves ATR huge.
+	history := make([]marketdata.Bar, 0, 30)
+	for i := 0; i < 29; i++ {
+		history = append(history, marketdata.Bar{
+			Timestamp: day(i), Open: 10, High: 10.05, Low: 9.95, Close: 10, Volume: 1_000_000,
+		})
+	}
+	// Three wide-range days drag the 14-period ATR well above 6% of price.
+	for i := 29; i < 32; i++ {
+		history = append(history, marketdata.Bar{
+			Timestamp: day(i), Open: 10, High: 16, Low: 4, Close: 10, Volume: 5_000_000,
+		})
+	}
+
+	raw := rawGap{symbol: "AAA", prevClose: 10, prevVolume: 1_000_000, refPrice: 12, gapPct: 20}
+
+	t.Run("ceiling off keeps it", func(t *testing.T) {
+		cfg := DefaultScannerConfig()
+		cfg.MaxATRPct = 0
+		cfg.MinSigmaSamples = 5
+		c := testScanner(t, cfg).buildCandidate(raw, history)
+
+		// The fixture only tests anything if it sits above the ceiling used below.
+		if atrPct := c.ATR / raw.refPrice * 100; atrPct <= 6.0 {
+			t.Fatalf("fixture ATR is %.1f%% of price, not above the 6%% ceiling", atrPct)
+		}
+		if len(c.Methods) == 0 {
+			t.Error("a 20% gap should flag when no ceiling is set")
+		}
+	})
+
+	t.Run("ceiling on drops it", func(t *testing.T) {
+		cfg := DefaultScannerConfig()
+		cfg.MaxATRPct = 6.0
+		cfg.MinSigmaSamples = 5
+		c := testScanner(t, cfg).buildCandidate(raw, history)
+
+		if len(c.Methods) != 0 {
+			t.Errorf("methods = %v, want empty above the ATR ceiling", c.Methods)
+		}
+		// Measurements are still recorded, so a carry-forward can fade rather
+		// than vanish.
+		if c.ATR <= 0 || c.GapPct == 0 {
+			t.Errorf("measurements were discarded: atr=%v gap=%v", c.ATR, c.GapPct)
+		}
+	})
+
+	t.Run("ordinary volatility is unaffected", func(t *testing.T) {
+		cfg := DefaultScannerConfig()
+		cfg.MaxATRPct = 6.0
+		cfg.MinSigmaSamples = 5
+		// Same shape, no wild day: ATR stays around 1% of price.
+		c := testScanner(t, cfg).buildCandidate(raw, history[:29])
+
+		if len(c.Methods) == 0 {
+			t.Error("a quiet name below the ceiling should still flag")
+		}
+	})
+}

@@ -761,6 +761,15 @@ func (s *Scanner) buildCandidate(raw rawGap, history []marketdata.Bar) GapCandid
 		c.GapSigma = (raw.gapPct/100 - mean) / stdev
 	}
 
+	// A name whose ATR is a large fraction of its price cannot be bracketed
+	// sensibly: 1x ATR becomes a -50% stop. Measured across 19k trades, gaps
+	// under 6% ATR drift up while those over 10% do not. Leave it unflagged
+	// rather than dropping it, so a carry-forward still records as faded.
+	if s.cfg.MaxATRPct > 0 && atr > 0 && raw.refPrice > 0 &&
+		atr/raw.refPrice*100 > s.cfg.MaxATRPct {
+		return c
+	}
+
 	// Method 1: plain percentage.
 	percentHit := math.Abs(c.GapPct) >= th.GapPct
 	atrHit := atr > 0 && c.GapATR >= th.ATRMult
