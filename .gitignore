@@ -50,3 +50,8 @@ key2
 key2.pub 
 .ipynb_checkpoints
 *.ipynb
+*ipynb*
+sim/__pycache__/
+news/__pycache__/
+.DS_Store
+__pycache__
