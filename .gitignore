@@ -48,3 +48,5 @@ data/
 CLAUDE.md
 key2
 key2.pub 
+.ipynb_checkpoints
+*.ipynb
