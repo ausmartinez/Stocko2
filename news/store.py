@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import time
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, date, timezone
 
@@ -71,6 +72,8 @@ def title_key(title: str) -> str:
 
 class NewsStore:
     def __init__(self, path=DB_PATH, read_only: bool = False):
+        if read_only and not Path(path).exists():
+            NewsStore(path).close()  # DuckDB can't create a file in read-only mode; make an empty one
         self.conn = connect(path, read_only)
         if not read_only:
             self.conn.execute(SCHEMA)
