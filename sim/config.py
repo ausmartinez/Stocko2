@@ -19,12 +19,14 @@ POPULATION_PERCENTILE = 0.80  # candidate strength must beat this share of all s
 MIN_POPULATION = 100  # below this many articles only the fixed floors apply
 EVENT_TYPES = {"fda_pdufa", "fda_adcom", "data_readout", "earnings", "product_launch", "investor_conference", "deal_close"}
 EVENT_MIN_SCORE = 0.0  # event plays need non-negative sentiment on the article that announced them
+EVENT_MIN_STRENGTH = 0.04  # score x confidence floor for event plays (they skip the population threshold)
 
 # --- Market filters at entry ---
 MIN_PRICE = 1.00
 MAX_SPREAD_PCT = 3.0
 MAX_QUOTE_AGE_SEC = 120
 MIN_GAP_PCT = None  # e.g. 2.0 to require the stock to be gapping up vs prior close
+MAX_GAP_PCT = 35.0  # skip stocks that already ran this far past the prior close; None to disable
 
 # --- Exits ---
 TAKE_PROFIT_PCT = 6.0

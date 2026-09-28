@@ -98,6 +98,9 @@ def enter_positions(store: SimStore, session, now: datetime):
         if cfg.MIN_GAP_PCT is not None and (gap_pct is None or gap_pct < cfg.MIN_GAP_PCT):
             reject(f"gap {gap_pct}% < {cfg.MIN_GAP_PCT}%")
             continue
+        if cfg.MAX_GAP_PCT is not None and gap_pct is not None and gap_pct > cfg.MAX_GAP_PCT:
+            reject(f"gap {gap_pct}% > {cfg.MAX_GAP_PCT}%")
+            continue
 
         pm = premarket.get(t, {})
         context = {

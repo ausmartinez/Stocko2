@@ -73,7 +73,7 @@ def select_candidates(session: Session, prev_session: Session, now_et: datetime,
         if t in held or e["event_type"] not in cfg.EVENT_TYPES:
             continue
         score, conf = e["score"] or 0.0, e["confidence"] or 0.0
-        if score < cfg.EVENT_MIN_SCORE:
+        if score < cfg.EVENT_MIN_SCORE or score * conf < cfg.EVENT_MIN_STRENGTH:
             continue
         if t in fresh_all and fresh_all[t]["score"] <= -0.15:
             continue  # today's news turned against the event
